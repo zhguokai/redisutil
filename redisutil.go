@@ -7,6 +7,14 @@ import (
 	"strconv"
 	"errors"
 )
+//DB常量,按需使用
+const (
+	DEFAULT_DB = 0
+	TOKEN_DB = 1
+	SMS_DB = 2
+	SEQNO_DB = 3
+	WX_TOKEN_DB = 4
+)
 
 //Redis连接池
 var pool *redis.Pool
