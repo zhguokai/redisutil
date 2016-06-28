@@ -4,186 +4,221 @@ import (
 	"github.com/garyburd/redigo/redis"
 	"log"
 	"time"
+	"strconv"
+	"errors"
 )
+
+//Redis连接池
+var pool *redis.Pool
 
 type RedisConfig struct {
 	Host      string
 	Port      int
 	MaxActive int
 	MaxIdle   int
-	TimeOut   int
+	TimeOut   time.Duration
+	PassWord  string
 }
 
 //注册Redis连接
-func RegisterRedis(rc RedisConfig) {
+func RegisterRedis(rc *RedisConfig) {
 
 	if rc == nil {
-
+		rc = &RedisConfig{}
+		rc.Host = "127.0.0.1"
+		rc.Port = 6379
+		rc.MaxActive = 100
+		rc.MaxIdle = 100
+		rc.TimeOut = 30 * time.Minute
 	}
 
-}
+	if rc.Host == "" {
+		rc.Host = "127.0.0.1"
+	}
+	if rc.Port == 0 {
+		rc.Port = 6379
+	}
+	if rc.MaxActive == 0 {
+		rc.MaxActive = 100
+	}
+	if rc.MaxIdle == 0 {
+		rc.MaxIdle = 0
+	}
+	if rc.TimeOut == 0 {
+		rc.TimeOut = 30 * time.Minute
+	}
 
-var pool *redis.Pool
+	url := rc.Host + ":" + strconv.Itoa(rc.Port)
 
+	pool = &redis.Pool{
+		//最大空闲连接
+		MaxIdle: rc.MaxIdle,
+		//最大活动连接
+		MaxActive: rc.MaxActive,
+		//空闲连接过期时间
+		IdleTimeout: rc.TimeOut,
 
-
-//初始化redis连接池
-func init() {
-	redisServer := "127.0.0.1:6379"
-	//redisPassword := ""
-	//创建Redis连接池
-	RedisClient = &redisTool{
-		pool: &redis.Pool{
-			//最大空闲连接
-			MaxIdle: 100,
-			//最大活动连接
-			MaxActive: 1000,
-			//空闲连接过期时间
-			IdleTimeout: 600 * time.Second,
-
-			Dial: func() (redis.Conn, error) {
-				c, err := redis.Dial("tcp", redisServer)
-				if err != nil {
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial("tcp", url)
+			if err != nil {
+				return nil, err
+			}
+			if rc.PassWord != "" {
+				if _, err := c.Do("AUTH", rc.PassWord); err != nil {
+					c.Close()
 					return nil, err
 				}
-				//if _, err := c.Do("AUTH", redisPassword); err != nil {
-				//	c.Close()
-				//	return nil, err
-				//}
-				return c, err
-			},
-			TestOnBorrow: func(c redis.Conn, t time.Time) error {
-				_, err := c.Do("PING")
-				return err
-			},
+			}
+			return c, err
+		},
+		TestOnBorrow: func(c redis.Conn, t time.Time) error {
+			_, err := c.Do("PING")
+			return err
 		},
 	}
-
 }
 
-//设置默认数据库
-func (p *redisTool) SetDefaultKeyValue(key string, value interface{}) (err error) {
-
-	con := p.pool.Get()
-	defer con.Close()
-	_, err = con.Do("SELECT", 0)
-	if err != nil {
-		log.Fatal(err)
-		return err
-	} else {
-		if _, err := con.Do("SET", key, value); err == nil {
-			return nil
-		} else {
-			log.Fatal(err)
-			return err
-		}
+//选择数据库
+func SelectDb(con redis.Conn, db int) bool {
+	if con == nil {
+		return false
 	}
-}
-
-//通过Key获取值
-func (p *redisTool) GetDefaultValue(key string) (res string, err error) {
-	con := p.pool.Get()
-	defer con.Close()
-	_, err = con.Do("SELECT", 0)
-	if err != nil {
-		log.Fatal(err)
-		return "", err
-	} else {
-		if res, err := redis.String(con.Do("GET", key)); err == nil {
-			return res, nil
-		} else {
-			log.Fatal(err)
-			return "", err
-		}
-	}
-}
-
-func (p *redisTool) GetValue(db int, key string) (res string) {
-	con := p.pool.Get()
-	defer con.Close()
 	_, err := con.Do("SELECT", db)
 	if err != nil {
-		log.Fatal(err)
-		return ""
-	} else {
-		reply, err := con.Do("GET", key)
-		if value, err := redis.String(reply, err); err == nil {
-			return value
-		} else {
-			return ""
-		}
-
+		log.Println("choose db failer,msg:", err.Error())
+		return false
 	}
+	return true
 }
 
-func (p *redisTool) SetKeyValue(db int, key string, value interface{}) (err error) {
-	con := p.pool.Get()
-	defer con.Close()
-	_, err = con.Do("SELECT", db)
-	if err != nil {
-		log.Fatal(err)
-		return err
-	} else {
-		if _, err := con.Do("SET", key, value); err == nil {
-			return nil
-		} else {
-			log.Fatal(err)
-			return err
-		}
+//获取连接
+func GetConn() redis.Conn {
+	if pool == nil {
+		log.Println("RegisterDB with the default Config value")
+		RegisterRedis(nil)
 	}
+	return pool.Get()
 }
 
-//存储哈希数据
-func (p *redisTool)SetHashValue(db int, key string, field string, value interface{}) (err error) {
-	con := p.pool.Get()
+func SetKeyValue(db int, key interface{}, value interface{}) bool {
+	con := GetConn()
 	defer con.Close()
-	_, err = con.Do("SELECT", db)
-	if err != nil {
-		log.Fatal(err)
-		return err
-	} else {
-		if _, err := con.Do("HSET", key, field, value); err == nil {
-			return nil
-		} else {
-			log.Fatal(err)
-			return err
-		}
+	if !SelectDb(con, db) {
+		return false
 	}
+	_, err := con.Do("SET", key, value)
+	if err != nil {
+		log.Println("set value failer,msg:", err.Error())
+		return false
+	}
+	return true
+}
+//获取
+func GetValue(db int, key interface{}) (value interface{}, err error) {
+	con := GetConn()
+	defer con.Close()
+	if !SelectDb(con, db) {
+		return "", errors.New("choose db failer")
+	}
+	v, errDo := con.Do("GET", key)
+	if errDo != nil {
+		return "", errDo
+	}
+	return v, nil
+}
+
+//获取字符串Value
+func GetStrValue(db int, key interface{}) (value string, err error) {
+	con := GetConn()
+	defer con.Close()
+	if !SelectDb(con, db) {
+		return "", errors.New("choose db failer")
+	}
+	v, errDo := con.Do("GET", key)
+	if errDo != nil {
+		return "", errDo
+	}
+	if v == nil {
+		return "", errors.New("the key doesn't exist")
+	}
+
+	value, err = redis.String(v, errDo)
+	if err != nil {
+		return "", err
+	}
+
+	return value, nil
+}
+
+//存储集合数据
+func HSetKeyFieldValue(db int, key, field, value interface{}) bool {
+	con := GetConn()
+	defer con.Close()
+	if !SelectDb(con, db) {
+		return false
+	}
+	_, err := con.Do("HSET", key, field, value)
+	if err != nil {
+		log.Println("HSET failer,msg:", err.Error())
+		return false
+	}
+	return true
+}
+
+
+
+//获取哈希数据
+func HGetKeyFieldValue(db int, key, field interface{}) (value interface{}, err error) {
+	con := GetConn()
+	defer con.Close()
+	if !SelectDb(con, db) {
+		return "", errors.New("choose db failer")
+	}
+	reply, err := con.Do("HGET", key, field)
+	if err != nil {
+		log.Fatalln("HGET value failer,msg:", err.Error())
+		return "", err
+	}
+	return reply, nil
 }
 
 //获取哈希数据
-func (p *redisTool)GetHashValue(db int, key string, field string) (value interface{}) {
-	con := p.pool.Get()
+func HGetKeyFieldStrValue(db int, key, field interface{}) (value string, err error) {
+	con := GetConn()
 	defer con.Close()
-	_, err := con.Do("SELECT", db)
-	if err != nil {
-		log.Fatal(err)
-		return nil
-	} else {
-		reply, err := con.Do("HGET", key, field)
-		if value, err := redis.String(reply, err); err == nil {
-			return value
-		} else {
-			return nil
-		}
+	if !SelectDb(con, db) {
+		return "", errors.New("choose db failer")
 	}
+	reply, err := con.Do("HGET", key, field)
+	if err != nil {
+		log.Fatalln("HGET value failer,msg:", err.Error())
+		return "", err
+	}
+	if reply == nil {
+		return "", errors.New("the key doesn't exist")
+	}
+	v, err := redis.String(reply, err)
+	if err != nil {
+		log.Fatalln("HGET value can't convert to string,msg:", err.Error())
+		return "", err
+	}
+	return v, nil
 }
 
 
+
 //删除键值数据
-func (p *redisTool)DeleteKeyValue(db int, key string) (err error) {
-	con := p.pool.Get()
+func DropKey(db int, key string) bool {
+	con := GetConn()
 	defer con.Close()
-	_, err = con.Do("SELECT", db)
-	if err != nil {
-		log.Fatal(err)
-		return err
-	} else {
-		if _, err := con.Do("DEL", key); err == nil {
-			return nil
-		} else {
-			log.Fatal(err)
-			return err
-		}
+	if !SelectDb(con, db) {
+		log.Fatalln("Select Redis Db failer")
+		return false
 	}
+	_, err := con.Do("DEL", key)
+	if err != nil {
+		log.Fatalln("DEL Redis key ", key, " failer,msg:", err.Error())
+		return false
+	}
+	return true
 }
